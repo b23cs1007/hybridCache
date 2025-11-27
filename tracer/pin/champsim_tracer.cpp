@@ -82,7 +82,13 @@ void ResetCurrentInstruction(VOID* ip)
 BOOL ShouldWrite()
 {
   ++instrCount;
-  return (instrCount > KnobSkipInstructions.Value()) && (instrCount <= (KnobTraceInstructions.Value() + KnobSkipInstructions.Value()));
+  if (instrCount > (KnobTraceInstructions.Value() + KnobSkipInstructions.Value())) {
+    // Stop the application with code 0.
+    // Note we don't use `PIN_Detach()` because that would stop instrumentation, but let the process continue, and there's no reason to do that.
+    PIN_ExitApplication(0);
+    return false;
+  }
+  return (instrCount > KnobSkipInstructions.Value());
 }
 
 void WriteCurrentInstruction()
