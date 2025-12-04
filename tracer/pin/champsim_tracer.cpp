@@ -85,10 +85,7 @@ void ResetCurrentInstruction(VOID* ip)
   curr_instr.ip = (unsigned long long int)ip;
 }
 
-BOOL ShouldWrite()
-{
-  return (instrCount > skipInstrs) && (instrCount <= (traceInstrs + skipInstrs));
-}
+BOOL ShouldWrite() { return (instrCount > skipInstrs) && (instrCount <= (traceInstrs + skipInstrs)); }
 
 void WriteCurrentInstruction()
 {
