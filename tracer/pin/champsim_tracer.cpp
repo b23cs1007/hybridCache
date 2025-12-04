@@ -34,7 +34,9 @@ using trace_instr_format_t = input_instr;
 // Global variables
 /* ================================================================== */
 
-UINT64 instrCount = 0;
+volatile UINT64 instrCount = 0;
+UINT64 skipInstrs = 0;
+UINT64 traceInstrs = 1000000;
 
 std::ofstream outfile;
 
@@ -75,14 +77,17 @@ INT32 Usage()
 
 void ResetCurrentInstruction(VOID* ip)
 {
+  ++instrCount;
+  if (instrCount > (traceInstrs + skipInstrs)) {
+    PIN_ExitApplication(0);
+  }
   curr_instr = {};
   curr_instr.ip = (unsigned long long int)ip;
 }
 
 BOOL ShouldWrite()
 {
-  ++instrCount;
-  return (instrCount > KnobSkipInstructions.Value()) && (instrCount <= (KnobTraceInstructions.Value() + KnobSkipInstructions.Value()));
+  return (instrCount > skipInstrs) && (instrCount <= (traceInstrs + skipInstrs));
 }
 
 void WriteCurrentInstruction()
@@ -182,6 +187,9 @@ int main(int argc, char* argv[])
     std::cout << "Couldn't open output trace file. Exiting." << std::endl;
     exit(1);
   }
+
+  traceInstrs = KnobTraceInstructions.Value();
+  skipInstrs = KnobSkipInstructions.Value();
 
   // Register function to be called to instrument instructions
   INS_AddInstrumentFunction(Instruction, 0);
