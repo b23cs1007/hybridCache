@@ -157,11 +157,6 @@ VOID StopTracing(VOID* ip)
 // Instrument image loads to find symbols
 VOID ImageLoad(IMG img, VOID* v)
 {
-  /* // List all symbols in the image to debug
-  for (SYM sym = IMG_RegsymHead(img); SYM_Valid(sym); sym = SYM_Next(sym)) {
-    std::cout << "Found symbol: " << SYM_Name(sym) << " at " << std::hex << SYM_Address(sym) << std::dec << std::endl;
-  } */
-
   // Look for start symbol
   if (!KnobStartSymbol.Value().empty() && !foundStartSymbol.load()) {
     RTN rtn = RTN_FindByName(img, KnobStartSymbol.Value().c_str());
