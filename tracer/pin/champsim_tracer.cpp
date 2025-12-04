@@ -77,16 +77,16 @@ INT32 Usage()
 
 void ResetCurrentInstruction(VOID* ip)
 {
+  ++instrCount;
+  if (instrCount > (traceInstrs + skipInstrs)) {
+    PIN_ExitApplication(0);
+  }
   curr_instr = {};
   curr_instr.ip = (unsigned long long int)ip;
 }
 
 BOOL ShouldWrite()
 {
-  ++instrCount;
-  if (instrCount > (traceInstrs + skipInstrs)) {
-    PIN_ExitApplication(0);
-  }
   return (instrCount > skipInstrs) && (instrCount <= (traceInstrs + skipInstrs));
 }
 
