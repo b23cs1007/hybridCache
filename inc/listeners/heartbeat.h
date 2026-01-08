@@ -56,7 +56,7 @@ inline void handle_event(Heartbeat* hb, Args&... args)
 }
 
 template <>
-inline void handle_event<Event::BEGIN_PHASE>(Heartbeat* hb, bool& is_warmup)
+inline void handle_event<Event::BEGIN_PHASE>(Heartbeat* hb, [[maybe_unused]] bool& is_warmup)
 {
   for (size_t i = 0; i < hb->switched_phase.size(); i++) {
     hb->switched_phase[i] = true;
