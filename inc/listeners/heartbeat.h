@@ -29,7 +29,7 @@ public:
   std::vector<bool> switched_phase; // true if there has been a begin_phase event since the last time RETIRE occurred
 
   template <Event e, typename... Args>
-  void handle_event(Args&... args);
+  void handle_event(Args&&... args);
 
   void add_cpu(uint32_t cpu)
   {
@@ -96,9 +96,9 @@ inline void handle_event<Event::RETIRE>(Heartbeat* hb, uint32_t& cpu, std::deque
 } // namespace heartbeat
 
 template <Event e, typename... Args>
-void Heartbeat::handle_event(Args&... args)
+void Heartbeat::handle_event(Args&&... args)
 {
-  heartbeat::handle_event<e>(this, args...);
+  heartbeat::handle_event<e>(this, std::forward<Args>(args)...);
 }
 
 #endif
