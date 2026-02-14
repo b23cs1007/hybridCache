@@ -49,7 +49,7 @@ auto build(PTWs... builders)
   (..., retval.emplace_back(builders));
   return retval;
 }
-}
+} // namespace configured
 } // namespace champsim
 
 #endif
