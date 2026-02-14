@@ -7,8 +7,11 @@
 
 #include "champsim.h"
 
-drrip::drrip(CACHE* cache) : replacement(cache), NUM_SET(cache->NUM_SET), NUM_WAY(cache->NUM_WAY), rrpv(static_cast<std::size_t>(NUM_SET * NUM_WAY)),
-PSEL(NUM_CPUS, champsim::msl::dscounter<long, PSEL_WIDTH>(champsim::msl::get_sample_rate(NUM_SET))) {}
+drrip::drrip(CACHE* cache)
+    : replacement(cache), NUM_SET(cache->NUM_SET), NUM_WAY(cache->NUM_WAY), rrpv(static_cast<std::size_t>(NUM_SET * NUM_WAY)),
+      PSEL(NUM_CPUS, champsim::msl::dscounter<long, PSEL_WIDTH>(champsim::msl::get_sample_rate(NUM_SET)))
+{
+}
 
 unsigned& drrip::get_rrpv(long set, long way) { return rrpv.at(static_cast<std::size_t>(set * NUM_WAY + way)); }
 
@@ -31,7 +34,7 @@ void drrip::update_replacement_state(uint32_t triggering_cpu, long set, long way
 {
 
   // cache hit
-  if(hit) {
+  if (hit) {
     // do not update replacement state for writebacks
     if (access_type{type} == access_type::WRITE) {
       get_rrpv(set, way) = maxRRPV - 1;
@@ -41,19 +44,20 @@ void drrip::update_replacement_state(uint32_t triggering_cpu, long set, long way
   }
 }
 
-void drrip::replacement_cache_fill(uint32_t triggering_cpu, long set, long way, champsim::address full_addr, champsim::address ip, champsim::address victim_addr, access_type type)
+void drrip::replacement_cache_fill(uint32_t triggering_cpu, long set, long way, champsim::address full_addr, champsim::address ip,
+                                   champsim::address victim_addr, access_type type)
 {
   // do not update replacement state for writebacks
   if (access_type{type} == access_type::WRITE) {
     get_rrpv(set, way) = maxRRPV - 1;
     return;
   }
-  if(PSEL[triggering_cpu].decide(set)) {
+  if (PSEL[triggering_cpu].decide(set)) {
     update_brrip(set, way);
   } else {
     update_srrip(set, way);
   }
-  //cache miss, update bad
+  // cache miss, update bad
   PSEL[triggering_cpu].update_bad(set);
 }
 

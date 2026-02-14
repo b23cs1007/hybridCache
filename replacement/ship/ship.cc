@@ -8,7 +8,8 @@
 
 // initialize replacement state
 ship::ship(CACHE* cache)
-    : replacement(cache), NUM_SET(cache->NUM_SET), NUM_WAY(cache->NUM_WAY), sampler(champsim::msl::get_num_samples(NUM_SET) * NUM_CPUS * static_cast<std::size_t>(NUM_WAY)),
+    : replacement(cache), NUM_SET(cache->NUM_SET), NUM_WAY(cache->NUM_WAY),
+      sampler(champsim::msl::get_num_samples(NUM_SET) * NUM_CPUS * static_cast<std::size_t>(NUM_WAY)),
       rrpv_values(static_cast<std::size_t>(NUM_SET * NUM_WAY), maxRRPV), set_categorizer(champsim::msl::get_sample_rate(NUM_SET))
 {
   std::generate_n(std::back_inserter(SHCT), NUM_CPUS, []() -> typename decltype(SHCT)::value_type { return {}; });
@@ -47,9 +48,9 @@ void ship::update_replacement_state(uint32_t triggering_cpu, long set, long way,
     auto s_set_end = std::next(s_set_begin, NUM_WAY);
 
     // check hit
-    auto match = std::find_if(s_set_begin, s_set_end, [addr = full_addr, shamt = champsim::data::bits{champsim::lg2(champsim::msl::get_num_samples(NUM_SET)) + champsim::lg2(NUM_WAY)}](auto x) {
-      return x.valid && x.address.slice_upper(shamt) == addr.slice_upper(shamt);
-    });
+    auto match = std::find_if(s_set_begin, s_set_end,
+                              [addr = full_addr, shamt = champsim::data::bits{champsim::lg2(champsim::msl::get_num_samples(NUM_SET)) + champsim::lg2(NUM_WAY)}](
+                                  auto x) { return x.valid && x.address.slice_upper(shamt) == addr.slice_upper(shamt); });
     if (match != s_set_end) {
       auto SHCT_idx = match->ip.slice_lower<32_b>().to<std::size_t>() % SHCT_PRIME;
       SHCT[triggering_cpu][SHCT_idx] -= 1;
@@ -73,11 +74,12 @@ void ship::update_replacement_state(uint32_t triggering_cpu, long set, long way,
     match->last_used = access_count++;
   }
 
-  if(hit)
+  if (hit)
     get_rrpv(set, way) = 0;
 }
 
-void ship::replacement_cache_fill(uint32_t triggering_cpu, long set, long way, champsim::address full_addr, champsim::address ip, champsim::address victim_addr, access_type type)
+void ship::replacement_cache_fill(uint32_t triggering_cpu, long set, long way, champsim::address full_addr, champsim::address ip, champsim::address victim_addr,
+                                  access_type type)
 {
   // handle writeback access
   if (access_type{type} == access_type::WRITE) {

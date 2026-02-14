@@ -51,7 +51,6 @@ public:
   void update_replacement_state(uint32_t triggering_cpu, long set, long way, champsim::address full_addr, champsim::address ip, champsim::address victim_addr,
                                 access_type type, uint8_t hit);
 
-
   // use this function to print out your own stats at the end of simulation
   // void replacement_final_stats() {}
 };

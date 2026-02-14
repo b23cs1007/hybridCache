@@ -17,16 +17,14 @@ public:
   static constexpr unsigned BRRIP_MAX = 32;
   static constexpr unsigned PSEL_WIDTH = 10;
 
-  enum class set_type {
-    follower, brrip_leader, srrip_leader
-  };
+  enum class set_type { follower, brrip_leader, srrip_leader };
 
   long NUM_SET, NUM_WAY;
 
   unsigned brrip_counter;
 
   std::vector<unsigned> rrpv;
-  std::vector<champsim::msl::dscounter<long,PSEL_WIDTH>> PSEL;
+  std::vector<champsim::msl::dscounter<long, PSEL_WIDTH>> PSEL;
 
   drrip(CACHE* cache);
 
@@ -43,7 +41,6 @@ public:
 
   void update_brrip(long set, long way);
   void update_srrip(long set, long way);
-
 };
 
 #endif
