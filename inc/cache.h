@@ -29,6 +29,7 @@
 #include <iterator> // for size
 #include <limits>   // for numeric_limits
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -101,6 +102,10 @@ public:
     access_type type;
     bool prefetch_from_this;
 
+    // Hybrid LLC: the medium this block will be filled into, decided once when the
+    // MSHR entry (or writeback fill) is allocated. Used by finish_packet() and handle_fill().
+    bool to_sram = false;
+
     uint8_t asid[2] = {std::numeric_limits<uint8_t>::max(), std::numeric_limits<uint8_t>::max()};
 
     champsim::chrono::clock::time_point time_enqueued;
@@ -147,6 +152,8 @@ private:
 
   bool is_sram_way(long way) const;
   bool target_is_sram(access_type type) const;
+  bool default_placement(access_type type) const;
+  bool miss_placement(const tag_lookup_type& handle_pkt);
   champsim::chrono::clock::duration medium_latency(bool sram, bool write) const;
   champsim::chrono::clock::time_point reserve_medium_port(bool sram, bool write, champsim::chrono::clock::duration latency);
   void count_medium_access(bool sram, bool write);
@@ -182,6 +189,7 @@ public:
   bool hybrid_llc;
   uint32_t SRAM_WAYS;
   champsim::hybrid_llc_policy HYBRID_POLICY;
+  bool HYBRID_WRITEBACK_SRAM, HYBRID_PREFETCH_SRAM, HYBRID_TRANSLATION_SRAM;
   champsim::chrono::clock::duration SRAM_READ_LATENCY, SRAM_WRITE_LATENCY, STTRAM_READ_LATENCY, STTRAM_WRITE_LATENCY;
   std::vector<champsim::chrono::clock::time_point> sram_read_ports, sram_write_ports, sttram_read_ports, sttram_write_ports;
   std::vector<access_type> pref_activate_mask;
@@ -239,6 +247,8 @@ public:
 
   /** Candidate way range for a fill of this type. Used by hybrid replacement policies. */
   [[nodiscard]] std::pair<long, long> hybrid_way_range(access_type type) const;
+  /** Candidate way range for a fill whose medium was already decided. */
+  [[nodiscard]] std::pair<long, long> hybrid_way_range(bool to_sram) const;
 
 #include "module_decl.inc"
 
@@ -270,6 +280,15 @@ public:
     virtual void impl_replacement_cache_fill(uint32_t triggering_cpu, long set, long way, champsim::address full_addr, champsim::address ip,
                                              champsim::address victim_addr, access_type type) = 0;
     virtual void impl_replacement_final_stats() = 0;
+
+    // Victim selection restricted to ways [first_way, last_way). Modules that provide the
+    // range-aware find_victim receive the range; all others get the classic find_victim call.
+    virtual long impl_find_victim_in_range(uint32_t triggering_cpu, uint64_t instr_id, long set, const BLOCK* current_set, champsim::address ip,
+                                           champsim::address full_addr, access_type type, long first_way, long last_way) = 0;
+    // Empty if no module provides placement_to_sram.
+    virtual std::optional<bool> impl_placement_to_sram(uint32_t triggering_cpu, champsim::address ip, champsim::address full_addr, access_type type) = 0;
+    virtual void impl_replacement_access_accepted(uint32_t triggering_cpu, long set, champsim::address full_addr, champsim::address ip, access_type type,
+                                                  bool hit) = 0;
   };
 
   template <typename... Ps>
@@ -311,6 +330,17 @@ public:
     void impl_replacement_cache_fill(uint32_t triggering_cpu, long set, long way, champsim::address full_addr, champsim::address ip,
                                      champsim::address victim_addr, access_type type) final;
     void impl_replacement_final_stats() final;
+    [[nodiscard]] long impl_find_victim_in_range(uint32_t triggering_cpu, uint64_t instr_id, long set, const BLOCK* current_set, champsim::address ip,
+                                                 champsim::address full_addr, access_type type, long first_way, long last_way) final;
+    [[nodiscard]] std::optional<bool> impl_placement_to_sram(uint32_t triggering_cpu, champsim::address ip, champsim::address full_addr,
+                                                             access_type type) final;
+    void impl_replacement_access_accepted(uint32_t triggering_cpu, long set, champsim::address full_addr, champsim::address ip, access_type type,
+                                          bool hit) final;
+
+  private:
+    template <typename R>
+    static long find_victim_one(R& r, uint32_t triggering_cpu, uint64_t instr_id, long set, const BLOCK* current_set, champsim::address ip,
+                                champsim::address full_addr, access_type type);
   };
 
   std::unique_ptr<prefetcher_module_concept> pref_module_pimpl;
@@ -334,6 +364,11 @@ public:
   void impl_replacement_cache_fill(uint32_t triggering_cpu, long set, long way, champsim::address full_addr, champsim::address ip,
                                    champsim::address victim_addr, access_type type) const;
   void impl_replacement_final_stats() const;
+  [[nodiscard]] long impl_find_victim_in_range(uint32_t triggering_cpu, uint64_t instr_id, long set, const BLOCK* current_set, champsim::address ip,
+                                               champsim::address full_addr, access_type type, long first_way, long last_way) const;
+  [[nodiscard]] std::optional<bool> impl_placement_to_sram(uint32_t triggering_cpu, champsim::address ip, champsim::address full_addr, access_type type) const;
+  void impl_replacement_access_accepted(uint32_t triggering_cpu, long set, champsim::address full_addr, champsim::address ip, access_type type,
+                                        bool hit) const;
   // NOLINTEND(readability-make-member-function-const)
 
   template <typename... Ps, typename... Rs>
@@ -342,7 +377,8 @@ public:
         NUM_WAY(b.get_num_ways()), MSHR_SIZE(b.get_num_mshrs()), PQ_SIZE(b.m_pq_size), HIT_LATENCY(b.get_hit_latency() * b.m_clock_period),
         FILL_LATENCY(b.get_fill_latency() * b.m_clock_period), OFFSET_BITS(b.m_offset_bits), MAX_TAG(b.get_tag_bandwidth()), MAX_FILL(b.get_fill_bandwidth()),
         prefetch_as_load(b.m_pref_load), match_offset_bits(b.m_wq_full_addr), virtual_prefetch(b.m_va_pref), hybrid_llc(b.m_hybrid_llc),
-        SRAM_WAYS(b.m_sram_ways.value_or(NUM_WAY)), HYBRID_POLICY(b.m_hybrid_policy),
+        SRAM_WAYS(b.m_sram_ways.value_or(NUM_WAY)), HYBRID_POLICY(b.m_hybrid_policy), HYBRID_WRITEBACK_SRAM(b.m_hybrid_writeback_sram),
+        HYBRID_PREFETCH_SRAM(b.m_hybrid_prefetch_sram), HYBRID_TRANSLATION_SRAM(b.m_hybrid_translation_sram),
         SRAM_READ_LATENCY(b.m_sram_read_lat.value_or(b.get_hit_latency()) * b.m_clock_period),
         SRAM_WRITE_LATENCY(b.m_sram_write_lat.value_or(b.get_fill_latency()) * b.m_clock_period),
         STTRAM_READ_LATENCY(b.m_sttram_read_lat.value_or(b.get_hit_latency()) * b.m_clock_period),
@@ -467,33 +503,92 @@ void CACHE::replacement_module_model<Rs...>::impl_initialize_replacement()
 }
 
 template <typename... Rs>
+template <typename R>
+long CACHE::replacement_module_model<Rs...>::find_victim_one(R& r, uint32_t triggering_cpu, uint64_t instr_id, long set, const BLOCK* current_set,
+                                                             champsim::address ip, champsim::address full_addr, access_type type)
+{
+  using return_type = long;
+  using namespace champsim::modules;
+
+  /* Strong addresses */
+  if constexpr (replacement::has_find_victim<R&, uint32_t, uint64_t, long, const BLOCK*, champsim::address, champsim::address, access_type>)
+    return return_type{r.find_victim(triggering_cpu, instr_id, set, current_set, ip, full_addr, type)};
+
+  /* Raw integer addresses */
+  if constexpr (replacement::has_find_victim<R&, uint32_t, uint64_t, long, const BLOCK*, champsim::address, champsim::address,
+                                             std::underlying_type_t<access_type>>)
+    return return_type{r.find_victim(triggering_cpu, instr_id, set, current_set, ip, full_addr, champsim::to_underlying(type))};
+
+  /* Raw integer addresses, raw integer access type */
+  if constexpr (replacement::has_find_victim<R&, uint32_t, uint64_t, long, const BLOCK*, uint64_t, uint64_t, std::underlying_type_t<access_type>>)
+    return return_type{r.find_victim(triggering_cpu, instr_id, set, current_set, ip.to<uint64_t>(), full_addr.to<uint64_t>(), champsim::to_underlying(type))};
+
+  return return_type{};
+}
+
+template <typename... Rs>
 long CACHE::replacement_module_model<Rs...>::impl_find_victim(uint32_t triggering_cpu, uint64_t instr_id, long set, const BLOCK* current_set,
                                                               champsim::address ip, champsim::address full_addr, access_type type)
 {
   using return_type = long;
-  [[maybe_unused]] auto process_one = [&](auto& r) {
-    using namespace champsim::modules;
-
-    /* Strong addresses */
-    if constexpr (replacement::has_find_victim<decltype(r), uint32_t, uint64_t, long, const BLOCK*, champsim::address, champsim::address, access_type>)
-      return return_type{r.find_victim(triggering_cpu, instr_id, set, current_set, ip, full_addr, type)};
-
-    /* Raw integer addresses */
-    if constexpr (replacement::has_find_victim<decltype(r), uint32_t, uint64_t, long, const BLOCK*, champsim::address, champsim::address,
-                                               std::underlying_type_t<access_type>>)
-      return return_type{r.find_victim(triggering_cpu, instr_id, set, current_set, ip, full_addr, champsim::to_underlying(type))};
-
-    /* Raw integer addresses, raw integer access type */
-    if constexpr (replacement::has_find_victim<decltype(r), uint32_t, uint64_t, long, const BLOCK*, uint64_t, uint64_t, std::underlying_type_t<access_type>>)
-      return return_type{r.find_victim(triggering_cpu, instr_id, set, current_set, ip.to<uint64_t>(), full_addr.to<uint64_t>(), champsim::to_underlying(type))};
-
-    return return_type{};
-  };
+  [[maybe_unused]] auto process_one = [&](auto& r) { return find_victim_one(r, triggering_cpu, instr_id, set, current_set, ip, full_addr, type); };
 
   if constexpr (sizeof...(Rs) > 0) {
     return std::apply([&](auto&... r) { return (..., process_one(r)); }, intern_);
   }
   return return_type{};
+}
+
+template <typename... Rs>
+long CACHE::replacement_module_model<Rs...>::impl_find_victim_in_range(uint32_t triggering_cpu, uint64_t instr_id, long set, const BLOCK* current_set,
+                                                                       champsim::address ip, champsim::address full_addr, access_type type, long first_way,
+                                                                       long last_way)
+{
+  using return_type = long;
+  [[maybe_unused]] auto process_one = [&](auto& r) {
+    using namespace champsim::modules;
+    /* Range-aware victim selection (hybrid modules) */
+    if constexpr (replacement::has_find_victim<decltype(r), uint32_t, uint64_t, long, const BLOCK*, champsim::address, champsim::address, access_type, long,
+                                               long>)
+      return return_type{r.find_victim(triggering_cpu, instr_id, set, current_set, ip, full_addr, type, first_way, last_way)};
+    else
+      return find_victim_one(r, triggering_cpu, instr_id, set, current_set, ip, full_addr, type);
+  };
+
+  if constexpr (sizeof...(Rs) > 0) {
+    return std::apply([&](auto&... r) { return (..., process_one(r)); }, intern_);
+  }
+  (void)first_way;
+  (void)last_way;
+  return return_type{};
+}
+
+template <typename... Rs>
+std::optional<bool> CACHE::replacement_module_model<Rs...>::impl_placement_to_sram(uint32_t triggering_cpu, champsim::address ip,
+                                                                                   champsim::address full_addr, access_type type)
+{
+  std::optional<bool> result{};
+  [[maybe_unused]] auto process_one = [&](auto& r) {
+    using namespace champsim::modules;
+    if constexpr (replacement::has_placement<decltype(r), uint32_t, champsim::address, champsim::address, access_type>)
+      result = static_cast<bool>(r.placement_to_sram(triggering_cpu, ip, full_addr, type));
+  };
+
+  std::apply([&](auto&... r) { (..., process_one(r)); }, intern_);
+  return result;
+}
+
+template <typename... Rs>
+void CACHE::replacement_module_model<Rs...>::impl_replacement_access_accepted(uint32_t triggering_cpu, long set, champsim::address full_addr,
+                                                                              champsim::address ip, access_type type, bool hit)
+{
+  [[maybe_unused]] auto process_one = [&](auto& r) {
+    using namespace champsim::modules;
+    if constexpr (replacement::has_access_accepted<decltype(r), uint32_t, long, champsim::address, champsim::address, access_type, bool>)
+      r.replacement_access_accepted(triggering_cpu, set, full_addr, ip, type, hit);
+  };
+
+  std::apply([&](auto&... r) { (..., process_one(r)); }, intern_);
 }
 
 template <typename... Rs>

@@ -38,6 +38,11 @@ enum class hybrid_llc_policy : uint8_t {
   read_stt_write_sram,
   read_sram_writeback_stt,
   demand_sram_prefetch_stt,
+  // Placement is decided once per miss by the replacement module's placement hook
+  // (e.g. replacement/hybrid_phc). LOAD/RFO misses ask the module; requests
+  // without a usable PC (writebacks, prefetches, translations) use the fixed
+  // hybrid_*_to_sram defaults below and never read the predictor.
+  pc_predictor,
 };
 
 class channel;
@@ -70,6 +75,10 @@ struct cache_builder_base {
   std::optional<uint64_t> m_sram_read_lat{}, m_sram_write_lat{}, m_sttram_read_lat{}, m_sttram_write_lat{};
   std::optional<uint32_t> m_sram_read_ports{}, m_sram_write_ports{}, m_sttram_read_ports{}, m_sttram_write_ports{};
   hybrid_llc_policy m_hybrid_policy{hybrid_llc_policy::read_stt_write_sram};
+  // Placement of requests with no usable PC under hybrid_llc_policy::pc_predictor.
+  bool m_hybrid_writeback_sram{true};
+  bool m_hybrid_prefetch_sram{false};
+  bool m_hybrid_translation_sram{false};
 
   std::vector<access_type> m_pref_act_mask{access_type::LOAD, access_type::PREFETCH};
   std::vector<champsim::channel*> m_uls{};
@@ -244,6 +253,15 @@ public:
   self_type& sttram_write_ports(uint32_t ports_);
 
   self_type& hybrid_policy(hybrid_llc_policy policy_);
+
+  /**
+   * Placement of requests that carry no usable PC under hybrid_llc_policy::pc_predictor.
+   * Defaults: writebacks -> SRAM, prefetches -> STT-RAM, translations -> STT-RAM.
+   * Ignored by the type-based policies.
+   */
+  self_type& hybrid_writeback_to_sram(bool to_sram_);
+  self_type& hybrid_prefetch_to_sram(bool to_sram_);
+  self_type& hybrid_translation_to_sram(bool to_sram_);
 
   /**
    * Specify the ``access_type`` values that should activate the prefetcher.
@@ -593,6 +611,27 @@ template <typename P, typename R>
 auto champsim::cache_builder<P, R>::hybrid_policy(hybrid_llc_policy policy_) -> self_type&
 {
   m_hybrid_policy = policy_;
+  return *this;
+}
+
+template <typename P, typename R>
+auto champsim::cache_builder<P, R>::hybrid_writeback_to_sram(bool to_sram_) -> self_type&
+{
+  m_hybrid_writeback_sram = to_sram_;
+  return *this;
+}
+
+template <typename P, typename R>
+auto champsim::cache_builder<P, R>::hybrid_prefetch_to_sram(bool to_sram_) -> self_type&
+{
+  m_hybrid_prefetch_sram = to_sram_;
+  return *this;
+}
+
+template <typename P, typename R>
+auto champsim::cache_builder<P, R>::hybrid_translation_to_sram(bool to_sram_) -> self_type&
+{
+  m_hybrid_translation_sram = to_sram_;
   return *this;
 }
 

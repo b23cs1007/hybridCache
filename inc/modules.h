@@ -181,6 +181,29 @@ struct replacement : public bound_to<CACHE> {
   template <typename, typename...>
   static auto final_stats_member_impl(long) -> std::false_type;
 
+  // Optional hybrid-LLC hook: called once when a LOAD/RFO miss allocates its MSHR entry
+  // under hybrid_llc_policy::pc_predictor. Returns true to place the block in SRAM.
+  //   bool placement_to_sram(uint32_t triggering_cpu, champsim::address ip, champsim::address full_addr, access_type type)
+  template <typename T, typename... Args>
+  static auto placement_member_impl(int) -> decltype(std::declval<T>().placement_to_sram(std::declval<Args>()...), std::true_type{});
+  template <typename, typename...>
+  static auto placement_member_impl(long) -> std::false_type;
+
+  // Optional hook: called exactly once per request, when the cache finally accepts it
+  // (a hit, a successful miss/MSHR-merge, or a writeback miss). Tag-check retries
+  // (MSHR full, lower queue full) do not call it. full_addr is the full physical address.
+  //   void replacement_access_accepted(uint32_t triggering_cpu, long set, champsim::address full_addr, champsim::address ip, access_type type, bool hit)
+  template <typename T, typename... Args>
+  static auto access_accepted_member_impl(int) -> decltype(std::declval<T>().replacement_access_accepted(std::declval<Args>()...), std::true_type{});
+  template <typename, typename...>
+  static auto access_accepted_member_impl(long) -> std::false_type;
+
+  template <typename T, typename... Args>
+  constexpr static bool has_placement = decltype(placement_member_impl<T, Args...>(0))::value;
+
+  template <typename T, typename... Args>
+  constexpr static bool has_access_accepted = decltype(access_accepted_member_impl<T, Args...>(0))::value;
+
   template <typename T, typename... Args>
   constexpr static bool has_initialize = decltype(initialize_member_impl<T, Args...>(0))::value;
 

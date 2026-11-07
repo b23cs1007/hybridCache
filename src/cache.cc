@@ -42,7 +42,8 @@ CACHE::CACHE(CACHE&& other)
       cpu(other.cpu), NAME(std::move(other.NAME)), NUM_SET(other.NUM_SET), NUM_WAY(other.NUM_WAY), MSHR_SIZE(other.MSHR_SIZE), PQ_SIZE(other.PQ_SIZE),
       HIT_LATENCY(other.HIT_LATENCY), FILL_LATENCY(other.FILL_LATENCY), OFFSET_BITS(other.OFFSET_BITS), block(std::move(other.block)), MAX_TAG(other.MAX_TAG),
       MAX_FILL(other.MAX_FILL), prefetch_as_load(other.prefetch_as_load), match_offset_bits(other.match_offset_bits), virtual_prefetch(other.virtual_prefetch),
-      hybrid_llc(other.hybrid_llc), SRAM_WAYS(other.SRAM_WAYS), HYBRID_POLICY(other.HYBRID_POLICY), SRAM_READ_LATENCY(other.SRAM_READ_LATENCY),
+      hybrid_llc(other.hybrid_llc), SRAM_WAYS(other.SRAM_WAYS), HYBRID_POLICY(other.HYBRID_POLICY), HYBRID_WRITEBACK_SRAM(other.HYBRID_WRITEBACK_SRAM),
+      HYBRID_PREFETCH_SRAM(other.HYBRID_PREFETCH_SRAM), HYBRID_TRANSLATION_SRAM(other.HYBRID_TRANSLATION_SRAM), SRAM_READ_LATENCY(other.SRAM_READ_LATENCY),
       SRAM_WRITE_LATENCY(other.SRAM_WRITE_LATENCY), STTRAM_READ_LATENCY(other.STTRAM_READ_LATENCY), STTRAM_WRITE_LATENCY(other.STTRAM_WRITE_LATENCY),
       sram_read_ports(std::move(other.sram_read_ports)), sram_write_ports(std::move(other.sram_write_ports)),
       sttram_read_ports(std::move(other.sttram_read_ports)), sttram_write_ports(std::move(other.sttram_write_ports)),
@@ -87,6 +88,9 @@ auto CACHE::operator=(CACHE&& other) -> CACHE&
   this->hybrid_llc = other.hybrid_llc;
   this->SRAM_WAYS = other.SRAM_WAYS;
   this->HYBRID_POLICY = other.HYBRID_POLICY;
+  this->HYBRID_WRITEBACK_SRAM = other.HYBRID_WRITEBACK_SRAM;
+  this->HYBRID_PREFETCH_SRAM = other.HYBRID_PREFETCH_SRAM;
+  this->HYBRID_TRANSLATION_SRAM = other.HYBRID_TRANSLATION_SRAM;
   this->SRAM_READ_LATENCY = other.SRAM_READ_LATENCY;
   this->SRAM_WRITE_LATENCY = other.SRAM_WRITE_LATENCY;
   this->STTRAM_READ_LATENCY = other.STTRAM_READ_LATENCY;
@@ -190,12 +194,14 @@ bool CACHE::handle_fill(const fill_type& fill)
 
   // find victim
   auto [set_begin, set_end] = get_set_span(fill.address);
-  auto [medium_begin_idx, medium_end_idx] = hybrid_way_range(fill.type);
+  // The medium was decided once when the MSHR entry / writeback fill was allocated.
+  auto [medium_begin_idx, medium_end_idx] = hybrid_way_range(fill.to_sram);
   auto medium_begin = std::next(set_begin, medium_begin_idx);
   auto medium_end = std::next(set_begin, medium_end_idx);
   auto way = std::find_if_not(medium_begin, medium_end, [](auto x) { return x.valid; });
   if (way == medium_end) {
-    way = std::next(set_begin, impl_find_victim(fill.cpu, fill.instr_id, get_set_index(fill.address), &*set_begin, fill.ip, fill.address, fill.type));
+    way = std::next(set_begin, impl_find_victim_in_range(fill.cpu, fill.instr_id, get_set_index(fill.address), &*set_begin, fill.ip, fill.address, fill.type,
+                                                         medium_begin_idx, medium_end_idx));
   }
   assert(medium_begin <= way);
   assert(way <= medium_end);
@@ -294,6 +300,9 @@ bool CACHE::try_hit(const tag_lookup_type& handle_pkt)
                                 hit);
 
   if (hit) {
+    // A hit is always accepted, so this is the one and only accepted-access event for this request.
+    impl_replacement_access_accepted(handle_pkt.cpu, get_set_index(handle_pkt.address), handle_pkt.address, handle_pkt.ip, handle_pkt.type, true);
+
     sim_stats.hits.increment(std::pair{handle_pkt.type, handle_pkt.cpu});
 
     response_type response{handle_pkt.address, handle_pkt.v_address, way->data, metadata_thru, handle_pkt.instr_depend_on_me};
@@ -381,7 +390,16 @@ bool CACHE::handle_miss(const tag_lookup_type& handle_pkt)
     // COLLECT STATS
     sim_stats.miss_merge.increment(std::pair{to_allocate.type, to_allocate.cpu});
 
+    const bool first_decision = fill_entry->to_sram;
     *fill_entry = fill_type::merge(*fill_entry, to_allocate);
+    if (HYBRID_POLICY == champsim::hybrid_llc_policy::pc_predictor) {
+      // Merged requests keep the first request's decision; the merger never consults the predictor.
+      fill_entry->to_sram = first_decision;
+    } else {
+      // Type-based policies: identical to the old behavior, which derived the medium from the
+      // (post-merge) type in finish_packet()/handle_fill().
+      fill_entry->to_sram = target_is_sram(fill_entry->type);
+    }
   } else {
     if (mshr_full) { // not enough MSHR resource
       return false;  // TODO should we allow prefetches anyway if they will not be filled to this level?
@@ -396,11 +414,15 @@ bool CACHE::handle_miss(const tag_lookup_type& handle_pkt)
 
     // Allocate an MSHR
     if (mshr_pkt.second.response_requested) {
+      // Decide the medium exactly once, when the MSHR entry is allocated (after the request
+      // has been accepted by the lower level, so retries never consult the predictor).
+      mshr_pkt.first.to_sram = miss_placement(handle_pkt);
       MSHR.emplace_back(std::move(mshr_pkt.first));
     }
   }
 
   sim_stats.misses.increment(std::pair{handle_pkt.type, handle_pkt.cpu});
+  impl_replacement_access_accepted(handle_pkt.cpu, get_set_index(handle_pkt.address), handle_pkt.address, handle_pkt.ip, handle_pkt.type, false);
 
   return true;
 }
@@ -414,10 +436,12 @@ bool CACHE::handle_write(const tag_lookup_type& handle_pkt)
   }
 
   fill_type to_allocate{handle_pkt, current_time};
+  to_allocate.to_sram = miss_placement(handle_pkt); // writebacks: fixed rule, never the predictor
   to_allocate.data_promise.ready_at(current_time + (warmup ? champsim::chrono::clock::duration{} : FILL_LATENCY));
   inflight_fills.push_back(to_allocate);
 
   sim_stats.misses.increment(std::pair{handle_pkt.type, handle_pkt.cpu});
+  impl_replacement_access_accepted(handle_pkt.cpu, get_set_index(handle_pkt.address), handle_pkt.address, handle_pkt.ip, handle_pkt.type, false);
 
   return true;
 }
@@ -593,8 +617,50 @@ bool CACHE::target_is_sram(access_type type) const
     return type == access_type::LOAD || type == access_type::RFO;
   case champsim::hybrid_llc_policy::demand_sram_prefetch_stt:
     return type != access_type::PREFETCH;
+  case champsim::hybrid_llc_policy::pc_predictor:
+    // Only meaningful for requests without a usable PC; LOAD/RFO are decided by the module.
+    return default_placement(type);
   }
   throw std::logic_error{"Unknown hybrid LLC placement policy"};
+}
+
+bool CACHE::default_placement(access_type type) const
+{
+  switch (type) {
+  case access_type::WRITE:
+    return HYBRID_WRITEBACK_SRAM;
+  case access_type::PREFETCH:
+    return HYBRID_PREFETCH_SRAM;
+  case access_type::TRANSLATION:
+    return HYBRID_TRANSLATION_SRAM;
+  default:
+    return false;
+  }
+}
+
+bool CACHE::miss_placement(const tag_lookup_type& handle_pkt)
+{
+  if (!hybrid_llc)
+    return true; // unused: hybrid_way_range(bool) spans every way for non-hybrid caches
+
+  if (HYBRID_POLICY != champsim::hybrid_llc_policy::pc_predictor)
+    return target_is_sram(handle_pkt.type); // type-based policies: unchanged behavior
+
+  // Technology-only partitions have a single legal medium.
+  if (SRAM_WAYS == 0)
+    return false;
+  if (SRAM_WAYS == NUM_WAY)
+    return true;
+
+  // Only LOAD and RFO carry a usable trigger PC. Everything else uses the fixed rule
+  // and neither reads nor trains the predictor.
+  if (handle_pkt.type != access_type::LOAD && handle_pkt.type != access_type::RFO)
+    return default_placement(handle_pkt.type);
+
+  auto decision = impl_placement_to_sram(handle_pkt.cpu, handle_pkt.ip, handle_pkt.address, handle_pkt.type);
+  if (!decision.has_value())
+    throw std::logic_error{NAME + ": hybrid_policy pc_predictor requires a replacement module that provides placement_to_sram()"};
+  return decision.value();
 }
 
 std::pair<long, long> CACHE::hybrid_way_range(access_type type) const
@@ -602,7 +668,15 @@ std::pair<long, long> CACHE::hybrid_way_range(access_type type) const
   if (!hybrid_llc)
     return {0, static_cast<long>(NUM_WAY)};
 
-  if (target_is_sram(type))
+  return hybrid_way_range(target_is_sram(type));
+}
+
+std::pair<long, long> CACHE::hybrid_way_range(bool to_sram) const
+{
+  if (!hybrid_llc)
+    return {0, static_cast<long>(NUM_WAY)};
+
+  if (to_sram)
     return {0, static_cast<long>(SRAM_WAYS)};
   return {static_cast<long>(SRAM_WAYS), static_cast<long>(NUM_WAY)};
 }
@@ -722,7 +796,7 @@ void CACHE::finish_packet(const response_type& packet)
   // MSHR holds the most updated information about this request
   fill_type::returned_value finished_value{packet.data, packet.pf_metadata};
   if (hybrid_llc && !warmup) {
-    const auto sram = target_is_sram(mshr_entry->type);
+    const auto sram = mshr_entry->to_sram;
     const auto latency = medium_latency(sram, true);
     const auto start = reserve_medium_port(sram, true, latency);
     mshr_entry->data_promise = champsim::waitable{finished_value, start + latency};
@@ -943,6 +1017,23 @@ void CACHE::impl_replacement_cache_fill(uint32_t triggering_cpu, long set, long 
 }
 
 void CACHE::impl_replacement_final_stats() const { repl_module_pimpl->impl_replacement_final_stats(); }
+
+long CACHE::impl_find_victim_in_range(uint32_t triggering_cpu, uint64_t instr_id, long set, const BLOCK* current_set, champsim::address ip,
+                                      champsim::address full_addr, access_type type, long first_way, long last_way) const
+{
+  return repl_module_pimpl->impl_find_victim_in_range(triggering_cpu, instr_id, set, current_set, ip, full_addr, type, first_way, last_way);
+}
+
+std::optional<bool> CACHE::impl_placement_to_sram(uint32_t triggering_cpu, champsim::address ip, champsim::address full_addr, access_type type) const
+{
+  return repl_module_pimpl->impl_placement_to_sram(triggering_cpu, ip, full_addr, type);
+}
+
+void CACHE::impl_replacement_access_accepted(uint32_t triggering_cpu, long set, champsim::address full_addr, champsim::address ip, access_type type,
+                                             bool hit) const
+{
+  repl_module_pimpl->impl_replacement_access_accepted(triggering_cpu, set, full_addr, ip, type, hit);
+}
 
 void CACHE::initialize()
 {
