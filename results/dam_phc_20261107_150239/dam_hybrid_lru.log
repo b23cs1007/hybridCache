@@ -1,0 +1,6 @@
+
+===== dam_hybrid_lru | trace: /mnt/c/Users/Bhagy/Champsim_hybridLLC/470.lbm-1274B.champsimtrace (1).xz =====
+Config: /mnt/c/Users/Bhagy/Champsim_hybridLLC/configs/dam_hybrid_lru.json
+Executable: bin/champsim_dam_hybrid_lru
+Heartbeat every 10000000 instructions
+Building dam_hybrid_lru (log: /mnt/c/Users/Bhagy/Champsim_hybridLLC/results/dam_phc_20261107_150239/dam_hybrid_lru.build.log)
