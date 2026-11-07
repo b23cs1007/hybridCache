@@ -1,0 +1,20 @@
+{
+  "LLC": {
+    "sets": 2048,
+    "ways": 16,
+    "hit_latency": 1,
+    "fill_latency": 1,
+    "hybrid_llc": true,
+    "sram_ways": 4,
+    "sram_read_latency": 20,
+    "sram_write_latency": 20,
+    "sttram_read_latency": 20,
+    "sttram_write_latency": 100,
+    "sram_read_ports": 1,
+    "sram_write_ports": 1,
+    "sttram_read_ports": 1,
+    "sttram_write_ports": 1,
+    "hybrid_policy": "read_stt_write_sram",
+    "replacement": "hybrid_lru"
+  }
+}

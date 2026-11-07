@@ -32,6 +32,14 @@
 class CACHE;
 namespace champsim
 {
+// Placement of a newly filled line in a hybrid SRAM/STT-RAM LLC.
+// The first sram_ways of every set are SRAM; the remaining ways are STT-RAM.
+enum class hybrid_llc_policy : uint8_t {
+  read_stt_write_sram,
+  read_sram_writeback_stt,
+  demand_sram_prefetch_stt,
+};
+
 class channel;
 template <typename... Ts>
 class cache_builder_module_type_holder
@@ -57,6 +65,11 @@ struct cache_builder_base {
   bool m_pref_load{};
   bool m_wq_full_addr{};
   bool m_va_pref{};
+  bool m_hybrid_llc{};
+  std::optional<uint32_t> m_sram_ways{};
+  std::optional<uint64_t> m_sram_read_lat{}, m_sram_write_lat{}, m_sttram_read_lat{}, m_sttram_write_lat{};
+  std::optional<uint32_t> m_sram_read_ports{}, m_sram_write_ports{}, m_sttram_read_ports{}, m_sttram_write_ports{};
+  hybrid_llc_policy m_hybrid_policy{hybrid_llc_policy::read_stt_write_sram};
 
   std::vector<access_type> m_pref_act_mask{access_type::LOAD, access_type::PREFETCH};
   std::vector<champsim::channel*> m_uls{};
@@ -211,6 +224,26 @@ public:
    * Specify that prefetchers should operate in the physical address space.
    */
   self_type& reset_virtual_prefetch();
+
+  /** Enable a static SRAM/STT-RAM partition for this cache. */
+  self_type& set_hybrid_llc();
+
+  /** Select the number of SRAM ways in every set. Remaining ways are STT-RAM. */
+  self_type& sram_ways(uint32_t ways_);
+
+  /** Set total per-medium access latencies, in cache-clock cycles. */
+  self_type& sram_read_latency(uint64_t latency_);
+  self_type& sram_write_latency(uint64_t latency_);
+  self_type& sttram_read_latency(uint64_t latency_);
+  self_type& sttram_write_latency(uint64_t latency_);
+
+  /** Set independent per-medium read/write port counts. */
+  self_type& sram_read_ports(uint32_t ports_);
+  self_type& sram_write_ports(uint32_t ports_);
+  self_type& sttram_read_ports(uint32_t ports_);
+  self_type& sttram_write_ports(uint32_t ports_);
+
+  self_type& hybrid_policy(hybrid_llc_policy policy_);
 
   /**
    * Specify the ``access_type`` values that should activate the prefetcher.
@@ -482,6 +515,84 @@ template <typename P, typename R>
 auto champsim::cache_builder<P, R>::reset_virtual_prefetch() -> self_type&
 {
   m_va_pref = false;
+  return *this;
+}
+
+template <typename P, typename R>
+auto champsim::cache_builder<P, R>::set_hybrid_llc() -> self_type&
+{
+  m_hybrid_llc = true;
+  return *this;
+}
+
+template <typename P, typename R>
+auto champsim::cache_builder<P, R>::sram_ways(uint32_t ways_) -> self_type&
+{
+  m_hybrid_llc = true;
+  m_sram_ways = ways_;
+  return *this;
+}
+
+template <typename P, typename R>
+auto champsim::cache_builder<P, R>::sram_read_latency(uint64_t latency_) -> self_type&
+{
+  m_sram_read_lat = latency_;
+  return *this;
+}
+
+template <typename P, typename R>
+auto champsim::cache_builder<P, R>::sram_write_latency(uint64_t latency_) -> self_type&
+{
+  m_sram_write_lat = latency_;
+  return *this;
+}
+
+template <typename P, typename R>
+auto champsim::cache_builder<P, R>::sttram_read_latency(uint64_t latency_) -> self_type&
+{
+  m_sttram_read_lat = latency_;
+  return *this;
+}
+
+template <typename P, typename R>
+auto champsim::cache_builder<P, R>::sttram_write_latency(uint64_t latency_) -> self_type&
+{
+  m_sttram_write_lat = latency_;
+  return *this;
+}
+
+template <typename P, typename R>
+auto champsim::cache_builder<P, R>::sram_read_ports(uint32_t ports_) -> self_type&
+{
+  m_sram_read_ports = ports_;
+  return *this;
+}
+
+template <typename P, typename R>
+auto champsim::cache_builder<P, R>::sram_write_ports(uint32_t ports_) -> self_type&
+{
+  m_sram_write_ports = ports_;
+  return *this;
+}
+
+template <typename P, typename R>
+auto champsim::cache_builder<P, R>::sttram_read_ports(uint32_t ports_) -> self_type&
+{
+  m_sttram_read_ports = ports_;
+  return *this;
+}
+
+template <typename P, typename R>
+auto champsim::cache_builder<P, R>::sttram_write_ports(uint32_t ports_) -> self_type&
+{
+  m_sttram_write_ports = ports_;
+  return *this;
+}
+
+template <typename P, typename R>
+auto champsim::cache_builder<P, R>::hybrid_policy(hybrid_llc_policy policy_) -> self_type&
+{
+  m_hybrid_policy = policy_;
   return *this;
 }
 

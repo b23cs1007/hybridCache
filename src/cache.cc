@@ -35,11 +35,17 @@
 CACHE::CACHE(CACHE&& other)
     : operable(other),
 
+      delayed_responses(std::move(other.delayed_responses)),
+
       upper_levels(std::move(other.upper_levels)), lower_level(std::move(other.lower_level)), lower_translate(std::move(other.lower_translate)),
 
       cpu(other.cpu), NAME(std::move(other.NAME)), NUM_SET(other.NUM_SET), NUM_WAY(other.NUM_WAY), MSHR_SIZE(other.MSHR_SIZE), PQ_SIZE(other.PQ_SIZE),
       HIT_LATENCY(other.HIT_LATENCY), FILL_LATENCY(other.FILL_LATENCY), OFFSET_BITS(other.OFFSET_BITS), block(std::move(other.block)), MAX_TAG(other.MAX_TAG),
       MAX_FILL(other.MAX_FILL), prefetch_as_load(other.prefetch_as_load), match_offset_bits(other.match_offset_bits), virtual_prefetch(other.virtual_prefetch),
+      hybrid_llc(other.hybrid_llc), SRAM_WAYS(other.SRAM_WAYS), HYBRID_POLICY(other.HYBRID_POLICY), SRAM_READ_LATENCY(other.SRAM_READ_LATENCY),
+      SRAM_WRITE_LATENCY(other.SRAM_WRITE_LATENCY), STTRAM_READ_LATENCY(other.STTRAM_READ_LATENCY), STTRAM_WRITE_LATENCY(other.STTRAM_WRITE_LATENCY),
+      sram_read_ports(std::move(other.sram_read_ports)), sram_write_ports(std::move(other.sram_write_ports)),
+      sttram_read_ports(std::move(other.sttram_read_ports)), sttram_write_ports(std::move(other.sttram_write_ports)),
       pref_activate_mask(std::move(other.pref_activate_mask)),
 
       sim_stats(std::move(other.sim_stats)), roi_stats(std::move(other.roi_stats)),
@@ -78,7 +84,19 @@ auto CACHE::operator=(CACHE&& other) -> CACHE&
   this->prefetch_as_load = other.prefetch_as_load;
   this->match_offset_bits = other.match_offset_bits;
   this->virtual_prefetch = other.virtual_prefetch;
+  this->hybrid_llc = other.hybrid_llc;
+  this->SRAM_WAYS = other.SRAM_WAYS;
+  this->HYBRID_POLICY = other.HYBRID_POLICY;
+  this->SRAM_READ_LATENCY = other.SRAM_READ_LATENCY;
+  this->SRAM_WRITE_LATENCY = other.SRAM_WRITE_LATENCY;
+  this->STTRAM_READ_LATENCY = other.STTRAM_READ_LATENCY;
+  this->STTRAM_WRITE_LATENCY = other.STTRAM_WRITE_LATENCY;
+  this->sram_read_ports = std::move(other.sram_read_ports);
+  this->sram_write_ports = std::move(other.sram_write_ports);
+  this->sttram_read_ports = std::move(other.sttram_read_ports);
+  this->sttram_write_ports = std::move(other.sttram_write_ports);
   this->pref_activate_mask = std::move(other.pref_activate_mask);
+  this->delayed_responses = std::move(other.delayed_responses);
 
   this->sim_stats = std::move(other.sim_stats);
   this->roi_stats = std::move(other.roi_stats);
@@ -172,13 +190,16 @@ bool CACHE::handle_fill(const fill_type& fill)
 
   // find victim
   auto [set_begin, set_end] = get_set_span(fill.address);
-  auto way = std::find_if_not(set_begin, set_end, [](auto x) { return x.valid; });
-  if (way == set_end) {
+  auto [medium_begin_idx, medium_end_idx] = hybrid_way_range(fill.type);
+  auto medium_begin = std::next(set_begin, medium_begin_idx);
+  auto medium_end = std::next(set_begin, medium_end_idx);
+  auto way = std::find_if_not(medium_begin, medium_end, [](auto x) { return x.valid; });
+  if (way == medium_end) {
     way = std::next(set_begin, impl_find_victim(fill.cpu, fill.instr_id, get_set_index(fill.address), &*set_begin, fill.ip, fill.address, fill.type));
   }
-  assert(set_begin <= way);
-  assert(way <= set_end);
-  assert(way != set_end || fill.type != access_type::WRITE); // Writes may not bypass
+  assert(medium_begin <= way);
+  assert(way <= medium_end);
+  assert(way != medium_end || fill.type != access_type::WRITE); // Writes may not bypass
   const auto way_idx = std::distance(set_begin, way);        // cast protected by earlier assertion
 
   if constexpr (champsim::debug_print) {
@@ -229,6 +250,8 @@ bool CACHE::handle_fill(const fill_type& fill)
     }
 
     *way = fill_block(fill, metadata_thru);
+    if (hybrid_llc)
+      count_medium_access(is_sram_way(way_idx), true);
   }
 
   // COLLECT STATS
@@ -274,8 +297,17 @@ bool CACHE::try_hit(const tag_lookup_type& handle_pkt)
     sim_stats.hits.increment(std::pair{handle_pkt.type, handle_pkt.cpu});
 
     response_type response{handle_pkt.address, handle_pkt.v_address, way->data, metadata_thru, handle_pkt.instr_depend_on_me};
-    for (auto* ret : handle_pkt.to_return) {
-      ret->push_back(response);
+    if (hybrid_llc && !warmup) {
+      const auto sram = is_sram_way(way_idx);
+      const auto write = handle_pkt.type == access_type::WRITE;
+      const auto latency = medium_latency(sram, write);
+      const auto start = reserve_medium_port(sram, write, latency);
+      delayed_responses.push_back({start + latency, std::move(response), handle_pkt.to_return});
+      count_medium_access(sram, write);
+    } else {
+      for (auto* ret : handle_pkt.to_return) {
+        ret->push_back(response);
+      }
     }
 
     way->dirty |= (handle_pkt.type == access_type::WRITE);
@@ -418,6 +450,16 @@ long CACHE::operate()
 {
   long progress{0};
 
+  auto response_end = std::partition(std::begin(delayed_responses), std::end(delayed_responses), [time = current_time](const auto& response) {
+    return response.ready_at <= time;
+  });
+  for (auto response_it = std::begin(delayed_responses); response_it != response_end; ++response_it) {
+    for (auto* destination : response_it->destinations)
+      destination->push_back(response_it->response);
+  }
+  progress += std::distance(std::begin(delayed_responses), response_end);
+  delayed_responses.erase(std::begin(delayed_responses), response_end);
+
   auto is_ready = [time = current_time](const auto& entry) {
     return entry.event_cycle <= time;
   };
@@ -534,6 +576,69 @@ std::pair<It, It> get_span(It anchor, typename std::iterator_traits<It>::differe
   return {std::move(begin), std::next(begin, num_way)};
 }
 
+bool CACHE::is_sram_way(long way) const { return way < static_cast<long>(SRAM_WAYS); }
+
+bool CACHE::target_is_sram(access_type type) const
+{
+  // Keep technology-only baselines valid regardless of the selected policy.
+  if (SRAM_WAYS == 0)
+    return false;
+  if (SRAM_WAYS == NUM_WAY)
+    return true;
+
+  switch (HYBRID_POLICY) {
+  case champsim::hybrid_llc_policy::read_stt_write_sram:
+    return type == access_type::RFO || type == access_type::WRITE;
+  case champsim::hybrid_llc_policy::read_sram_writeback_stt:
+    return type == access_type::LOAD || type == access_type::RFO;
+  case champsim::hybrid_llc_policy::demand_sram_prefetch_stt:
+    return type != access_type::PREFETCH;
+  }
+  throw std::logic_error{"Unknown hybrid LLC placement policy"};
+}
+
+std::pair<long, long> CACHE::hybrid_way_range(access_type type) const
+{
+  if (!hybrid_llc)
+    return {0, static_cast<long>(NUM_WAY)};
+
+  if (target_is_sram(type))
+    return {0, static_cast<long>(SRAM_WAYS)};
+  return {static_cast<long>(SRAM_WAYS), static_cast<long>(NUM_WAY)};
+}
+
+champsim::chrono::clock::duration CACHE::medium_latency(bool sram, bool write) const
+{
+  if (sram)
+    return write ? SRAM_WRITE_LATENCY : SRAM_READ_LATENCY;
+  return write ? STTRAM_WRITE_LATENCY : STTRAM_READ_LATENCY;
+}
+
+champsim::chrono::clock::time_point CACHE::reserve_medium_port(bool sram, bool write, champsim::chrono::clock::duration latency)
+{
+  auto& ports = sram ? (write ? sram_write_ports : sram_read_ports) : (write ? sttram_write_ports : sttram_read_ports);
+  auto next_port = std::min_element(std::begin(ports), std::end(ports));
+  const auto start = std::max(current_time, *next_port);
+  *next_port = start + latency;
+  return start;
+}
+
+void CACHE::count_medium_access(bool sram, bool write)
+{
+  auto& stats = sim_stats;
+  if (sram) {
+    if (write)
+      ++stats.sram_writes;
+    else
+      ++stats.sram_reads;
+  } else {
+    if (write)
+      ++stats.sttram_writes;
+    else
+      ++stats.sttram_reads;
+  }
+}
+
 auto CACHE::get_set_span(champsim::address address) -> std::pair<set_type::iterator, set_type::iterator>
 {
   const auto set_idx = get_set_index(address);
@@ -616,7 +721,14 @@ void CACHE::finish_packet(const response_type& packet)
 
   // MSHR holds the most updated information about this request
   fill_type::returned_value finished_value{packet.data, packet.pf_metadata};
-  mshr_entry->data_promise = champsim::waitable{finished_value, current_time + (warmup ? champsim::chrono::clock::duration{} : FILL_LATENCY)};
+  if (hybrid_llc && !warmup) {
+    const auto sram = target_is_sram(mshr_entry->type);
+    const auto latency = medium_latency(sram, true);
+    const auto start = reserve_medium_port(sram, true, latency);
+    mshr_entry->data_promise = champsim::waitable{finished_value, start + latency};
+  } else {
+    mshr_entry->data_promise = champsim::waitable{finished_value, current_time + (warmup ? champsim::chrono::clock::duration{} : FILL_LATENCY)};
+  }
   if constexpr (champsim::debug_print) {
     fmt::print("[{}_MSHR] finish_packet instr_id: {} address: {} data: {} type: {} current: {}\n", this->NAME, mshr_entry->instr_id, mshr_entry->address,
                mshr_entry->data_promise->data, access_type_names.at(champsim::to_underlying(mshr_entry->type)), current_time.time_since_epoch() / clock_period);
@@ -872,6 +984,10 @@ void CACHE::end_phase(unsigned finished_cpu)
   roi_stats.pf_useful = sim_stats.pf_useful;
   roi_stats.pf_useless = sim_stats.pf_useless;
   roi_stats.pf_fill = sim_stats.pf_fill;
+  roi_stats.sram_reads = sim_stats.sram_reads;
+  roi_stats.sram_writes = sim_stats.sram_writes;
+  roi_stats.sttram_reads = sim_stats.sttram_reads;
+  roi_stats.sttram_writes = sim_stats.sttram_writes;
 
   for (auto* ul : upper_levels) {
     ul->roi_stats.RQ_ACCESS = ul->sim_stats.RQ_ACCESS;

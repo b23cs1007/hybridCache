@@ -89,7 +89,18 @@ cache_builder_parts = {
     '_prefetcher_data': '.prefetcher<{^prefetcher_string}>()',
     'lower_translate': '.lower_translate(&{^lower_translate_queues})',
     'lower_level': '.lower_level(&{^lower_level_queues})',
-    'frequency': '.clock_period(champsim::chrono::picoseconds{{{^clock_period}}})'
+    'frequency': '.clock_period(champsim::chrono::picoseconds{{{^clock_period}}})',
+    'hybrid_llc': '.set_hybrid_llc()',
+    'sram_ways': '.sram_ways({sram_ways})',
+    'sram_read_latency': '.sram_read_latency({sram_read_latency})',
+    'sram_write_latency': '.sram_write_latency({sram_write_latency})',
+    'sttram_read_latency': '.sttram_read_latency({sttram_read_latency})',
+    'sttram_write_latency': '.sttram_write_latency({sttram_write_latency})',
+    'sram_read_ports': '.sram_read_ports({sram_read_ports})',
+    'sram_write_ports': '.sram_write_ports({sram_write_ports})',
+    'sttram_read_ports': '.sttram_read_ports({sttram_read_ports})',
+    'sttram_write_ports': '.sttram_write_ports({sttram_write_ports})',
+    'hybrid_policy': '.hybrid_policy(champsim::hybrid_llc_policy::{hybrid_policy})'
 }
 
 ptw_builder_parts = {

@@ -119,6 +119,11 @@ std::vector<std::string> champsim::plain_printer::format(CACHE::stats_type stats
     lines.push_back(fmt::format("cpu{}->{} PREFETCH REQUESTED: {:10} ISSUED: {:10} USEFUL: {:10} USELESS: {:10}", cpu, stats.name, stats.pf_requested,
                                 stats.pf_issued, stats.pf_useful, stats.pf_useless));
 
+    if (stats.sram_reads != 0 || stats.sram_writes != 0 || stats.sttram_reads != 0 || stats.sttram_writes != 0) {
+      lines.push_back(fmt::format("cpu{}->{} HYBRID LLC SRAM READS: {:10} WRITES: {:10} STTRAM READS: {:10} WRITES: {:10}", cpu, stats.name,
+                                  stats.sram_reads, stats.sram_writes, stats.sttram_reads, stats.sttram_writes));
+    }
+
     uint64_t total_downstream_demands = total_fill - stats.fill.value_or(std::pair{access_type::PREFETCH, cpu}, fill_value_type{});
     lines.push_back(
         fmt::format("cpu{}->{} AVERAGE MISS LATENCY: {} cycles", cpu, stats.name, ::print_ratio(stats.total_miss_latency_cycles, total_downstream_demands)));

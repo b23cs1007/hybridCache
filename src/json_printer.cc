@@ -51,6 +51,8 @@ void to_json(nlohmann::json& j, const CACHE::stats_type& stats)
   statsmap.emplace("prefetch issued", stats.pf_issued);
   statsmap.emplace("useful prefetch", stats.pf_useful);
   statsmap.emplace("useless prefetch", stats.pf_useless);
+  statsmap.emplace("hybrid LLC", nlohmann::json{{"SRAM reads", stats.sram_reads}, {"SRAM writes", stats.sram_writes},
+                                                  {"STTRAM reads", stats.sttram_reads}, {"STTRAM writes", stats.sttram_writes}});
 
   uint64_t total_downstream_demands = stats.fill.total();
   for (std::size_t cpu = 0; cpu < NUM_CPUS; ++cpu)

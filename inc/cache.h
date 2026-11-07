@@ -145,9 +145,22 @@ private:
   auto matches_address(champsim::address address) const;
   std::pair<fill_type, request_type> mshr_and_forward_packet(const tag_lookup_type& handle_pkt);
 
+  bool is_sram_way(long way) const;
+  bool target_is_sram(access_type type) const;
+  champsim::chrono::clock::duration medium_latency(bool sram, bool write) const;
+  champsim::chrono::clock::time_point reserve_medium_port(bool sram, bool write, champsim::chrono::clock::duration latency);
+  void count_medium_access(bool sram, bool write);
+
+  struct delayed_response {
+    champsim::chrono::clock::time_point ready_at;
+    response_type response;
+    std::vector<std::deque<response_type>*> destinations;
+  };
+
   std::deque<tag_lookup_type> internal_PQ{};
   std::deque<tag_lookup_type> inflight_tag_check{};
   std::deque<tag_lookup_type> translation_stash{};
+  std::deque<delayed_response> delayed_responses{};
 
 public:
   std::vector<channel_type*> upper_levels;
@@ -166,6 +179,11 @@ public:
   bool prefetch_as_load;
   bool match_offset_bits;
   bool virtual_prefetch;
+  bool hybrid_llc;
+  uint32_t SRAM_WAYS;
+  champsim::hybrid_llc_policy HYBRID_POLICY;
+  champsim::chrono::clock::duration SRAM_READ_LATENCY, SRAM_WRITE_LATENCY, STTRAM_READ_LATENCY, STTRAM_WRITE_LATENCY;
+  std::vector<champsim::chrono::clock::time_point> sram_read_ports, sram_write_ports, sttram_read_ports, sttram_write_ports;
   std::vector<access_type> pref_activate_mask;
 
   using stats_type = cache_stats;
@@ -218,6 +236,9 @@ public:
   prefetch_line(uint64_t ip, uint64_t base_addr, uint64_t pf_addr, bool fill_this_level, uint32_t prefetch_metadata);
 
   void print_deadlock() final;
+
+  /** Candidate way range for a fill of this type. Used by hybrid replacement policies. */
+  [[nodiscard]] std::pair<long, long> hybrid_way_range(access_type type) const;
 
 #include "module_decl.inc"
 
@@ -320,9 +341,19 @@ public:
       : champsim::operable(b.m_clock_period), upper_levels(b.m_uls), lower_level(b.m_ll), lower_translate(b.m_lt), NAME(b.m_name), NUM_SET(b.get_num_sets()),
         NUM_WAY(b.get_num_ways()), MSHR_SIZE(b.get_num_mshrs()), PQ_SIZE(b.m_pq_size), HIT_LATENCY(b.get_hit_latency() * b.m_clock_period),
         FILL_LATENCY(b.get_fill_latency() * b.m_clock_period), OFFSET_BITS(b.m_offset_bits), MAX_TAG(b.get_tag_bandwidth()), MAX_FILL(b.get_fill_bandwidth()),
-        prefetch_as_load(b.m_pref_load), match_offset_bits(b.m_wq_full_addr), virtual_prefetch(b.m_va_pref), pref_activate_mask(b.m_pref_act_mask),
+        prefetch_as_load(b.m_pref_load), match_offset_bits(b.m_wq_full_addr), virtual_prefetch(b.m_va_pref), hybrid_llc(b.m_hybrid_llc),
+        SRAM_WAYS(b.m_sram_ways.value_or(NUM_WAY)), HYBRID_POLICY(b.m_hybrid_policy),
+        SRAM_READ_LATENCY(b.m_sram_read_lat.value_or(b.get_hit_latency()) * b.m_clock_period),
+        SRAM_WRITE_LATENCY(b.m_sram_write_lat.value_or(b.get_fill_latency()) * b.m_clock_period),
+        STTRAM_READ_LATENCY(b.m_sttram_read_lat.value_or(b.get_hit_latency()) * b.m_clock_period),
+        STTRAM_WRITE_LATENCY(b.m_sttram_write_lat.value_or(b.get_fill_latency()) * b.m_clock_period),
+        sram_read_ports(std::max(1u, b.m_sram_read_ports.value_or(1u))), sram_write_ports(std::max(1u, b.m_sram_write_ports.value_or(1u))),
+        sttram_read_ports(std::max(1u, b.m_sttram_read_ports.value_or(1u))), sttram_write_ports(std::max(1u, b.m_sttram_write_ports.value_or(1u))),
+        pref_activate_mask(b.m_pref_act_mask),
         pref_module_pimpl(std::make_unique<prefetcher_module_model<Ps...>>(this)), repl_module_pimpl(std::make_unique<replacement_module_model<Rs...>>(this))
   {
+    if (SRAM_WAYS > NUM_WAY)
+      throw std::invalid_argument{"Hybrid LLC SRAM ways cannot exceed total ways"};
   }
 
   CACHE(const CACHE&) = delete;
